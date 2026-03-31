@@ -5,40 +5,37 @@ const OpenAI = require("openai");
 const app = express();
 app.use(express.json());
 
-// =============================
-// CONFIGURAÇÕES (CORRIGIDAS)
-// =============================
-const VERIFY_TOKEN = "lis_token_123";
-const ACCESS_TOKEN = "EAANvwn5xPGIBRBeaUAge4DvVG4ujPahMDZCdmMZCke2jAzDtVCOZAFk7EuAGZC6BjyrpAURbZBf6O21B1NuRmRdygyt5XsbgFTrN82cSbxvix6rDbujRq6o04OyOPZCduUYZB7XgPfZCxVjKUj0hZB5fx5DBGg5nqyPzmKVHIEeSmdHZAojsT03IcqbIzqlQUY59Q3yQZDZD";
-const PHONE_NUMBER_ID = "1049978348196137";
-const OPENAI_API_KEY = "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";
+// ==========================================
+// CONFIGURAÇÕES (COLE SUAS CHAVES AQUI)
+// ==========================================
+const VERIFY_TOKEN = "lis_token_123"; 
+const ACCESS_TOKEN = "EAANvwn5xPGIBRBz2rznmn0sYtm7j6U7bK02nNTqGaO6IDZCCQ3PiZBFPFhZB0Hi61ydq9YQ4OrecCnzxvejZB6MIRZCHEfeZA6B2buOl6Voev59bEuuljjKMU7tjMg1puOHYEy2lduYDhyrhGanZCxZCOBej4WvCHJMKR65ZBixh1dFrXTw7vomZArjFDZCsamZCbUkn9AZDZD"; 
+const PHONE_NUMBER_ID = "1049978348196137"; 
+const OPENAI_API_KEY = "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"; 
 
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-});
-
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const memory = {};
 
-// =============================
-// VERIFICAÇÃO WEBHOOK (O QUE A META PRECISA)
-// =============================
+// VERIFICAÇÃO DO WEBHOOK
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ WEBHOOK VALIDADO COM SUCESSO!");
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
-// =============================
-// RECEBER MENSAGENS
-// =============================
+// PROCESSAMENTO DE MENSAGENS
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const message = changes?.value?.messages?.[0];
+
     if (!message || message.type !== "text") return res.sendStatus(200);
 
     const from = message.from;
@@ -47,21 +44,22 @@ app.post("/webhook", async (req, res) => {
     if (!memory[from]) memory[from] = [];
     memory[from].push({ role: "user", content: text });
 
-    // COMANDO E MODELO CORRIGIDOS ABAIXO
+    // CHAMADA CORRIGIDA PARA GPT-4O-MINI
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", 
+      model: "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content: "Você é a Lis, atendente da PlayPrime IPTV. PLANOS: 1 tela: R$30, 2 telas: R$50, 3 telas: R$70. OBJETIVO: Vender. FECHAMENTO: https://wa.me/5521964816185"
+        { 
+          role: "system", 
+          content: "Você é a Lis, atendente da PlayPrime IPTV. Planos: 1 tela R$30, 2 telas R$50, 3 telas R$70. Seja direta e vendedora. Link de fechamento: https://wa.me/5521964816185" 
         },
-        ...memory[from],
+        ...memory[from]
       ],
     });
 
     const resposta = completion.choices[0].message.content;
     memory[from].push({ role: "assistant", content: resposta });
 
+    // ENVIO PARA WHATSAPP
     await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: "whatsapp",
       to: from,
@@ -72,10 +70,14 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error("ERRO:", error.response?.data || error.message);
+    console.error("❌ ERRO NO SISTEMA:", error.response?.data || error.message);
     res.sendStatus(500);
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("🚀 LIS ONLINE NA PORTA", PORT));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("=====================================");
+  console.log("🚀 ARMADURA MARK 85: LIS ONLINE!");
+  console.log("=====================================");
+});
