@@ -15,11 +15,9 @@ if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !GEMINI_API_KEY) {
   console.error("❌ Faltando variáveis de ambiente (ACCESS_TOKEN, PHONE_NUMBER_ID ou GEMINI_API_KEY)");
 }
 
-// ==================== GEMINI ====================
-// Modelos atualizados em 2026 - use um destes:
-const MODEL_NAME = "gemini-2.0-flash";        // Recomendado (rápido e bom)
-// const MODEL_NAME = "gemini-flash-latest";  // Alternativa (aponta para o mais recente Flash)
-// const MODEL_NAME = "gemini-2.5-flash";     // Se quiser o mais novo
+// ==================== GEMINI - MODELO ATUALIZADO 2026 ====================
+// Usando modelo com melhor suporte no free tier em março/2026
+const MODEL_NAME = "gemini-2.5-flash-lite";   // Melhor opção atual para free tier
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ 
@@ -41,7 +39,7 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-// ==================== WEBHOOK POST (Mensagens) ====================
+// ==================== WEBHOOK POST (Mensagens do WhatsApp) ====================
 app.post("/webhook", async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
@@ -56,29 +54,29 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 Mensagem de ${from}: ${userText}`);
 
-    // Prompt melhorado
-    const prompt = `Você é a Lis, atendente simpática e profissional da PlayPrime IPTV.
+    // Prompt da Lis (atendente)
+    const prompt = `Você é a Lis, atendente simpática, educada e profissional da PlayPrime IPTV.
 
 Planos disponíveis:
-• 1 tela → R$ 30/mês
+• 1 tela  → R$ 30/mês
 • 2 telas → R$ 50/mês
 • 3 telas → R$ 70/mês
 
 Link para falar com humano: https://wa.me/5521964816185
 
-Responda de forma curta, educada e direta. Não invente informações.
+Responda de forma curta, clara e educada. Não invente informações.
 
 Cliente disse: "${userText}"`;
 
     const result = await model.generateContent(prompt);
     let botResponse = result.response.text();
 
-    // Limita tamanho da resposta (evita erro no WhatsApp)
+    // Limita o tamanho da resposta para evitar erro no WhatsApp
     if (botResponse.length > 1500) {
       botResponse = botResponse.substring(0, 1497) + "...";
     }
 
-    // Envia resposta para o WhatsApp
+    // Envia a resposta para o WhatsApp
     await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: "whatsapp",
       to: from,
@@ -90,14 +88,22 @@ Cliente disse: "${userText}"`;
       }
     });
 
+    console.log(`✅ Resposta enviada para ${from}`);
+
   } catch (error) {
     console.error("❌ ERRO NO GEMINI/WHATSAPP:", error.message);
+
     if (error.response?.data) {
-      console.error("Detalhes:", JSON.stringify(error.response.data, null, 2));
+      console.error("Detalhes do erro:", JSON.stringify(error.response.data, null, 2));
+    }
+
+    // Se for erro de quota (429), avisa no console
+    if (error.message.includes("429") || error.message.includes("quota")) {
+      console.error("⚠️  QUOTA DO GEMINI ESGOTADA! Aguarde ou crie uma nova chave API.");
     }
   }
 
-  // Sempre retornar 200 para o Meta não reenviar a mensagem
+  // SEMPRE retornar 200 para o Meta não reenviar a mensagem
   res.sendStatus(200);
 });
 
