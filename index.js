@@ -13,7 +13,7 @@ const ACCESS_TOKEN = "EAANvwn5xPGIBRBeaUAge4DvVG4ujPahMDZCdmMZCke2jAzDtVCOZAFk7E
 const PHONE_NUMBER_ID = "1049978348196137"; 
 const GEMINI_API_KEY = "AIzaSyCIkVJdOwbmV9Cd5s7Y92WwgHHvi-hiHvw"; 
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 const memory = {};
