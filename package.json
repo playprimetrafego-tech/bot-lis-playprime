@@ -1,14 +1,12 @@
 {
-  "name": "bot-lis-playprime",
+  "name": "lis-whatsapp",
   "version": "1.0.0",
-  "description": "Bot da Lis com Gemini",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.2",
-    "@google/generative-ai": "^0.1.0"
+    "axios": "^1.6.0"
   }
 }
