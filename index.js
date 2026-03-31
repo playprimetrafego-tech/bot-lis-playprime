@@ -14,7 +14,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
 // CONFIGURAÇÃO DO MOTOR GEMINI (NOME CORRIGIDO PARA EVITAR 404)
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "models/gemini-1.5-flash" });
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // 1. VALIDAÇÃO DO WEBHOOK
