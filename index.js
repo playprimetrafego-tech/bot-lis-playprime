@@ -6,25 +6,24 @@ const app = express();
 app.use(express.json());
 
 // =========================================================
-// 🛡️ CONFIGURAÇÕES VIA AMBIENTE (RENDER)
+// 🛡️ CONFIGURAÇÕES (PEGANDO TUDO DO PAINEL DO RENDER)
 // =========================================================
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lis_token_123"; 
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN; 
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-// Inicialização Única do Gemini
+// CONFIGURAÇÃO DO MOTOR GEMINI (NOME CORRIGIDO PARA EVITAR 404)
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
-// 1. VALIDAÇÃO DO WEBHOOK (META)
+// 1. VALIDAÇÃO DO WEBHOOK
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ WEBHOOK VALIDADO!");
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
@@ -44,15 +43,15 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 Mensagem de ${from}: ${text}`);
 
-    // Instruções da Lis
+    // Contexto da Lis
     const systemInstruction = "Você é a Lis, atendente da PlayPrime IPTV. Planos: 1 tela R$30, 2 telas R$50, 3 telas R$70. Seja vendedora e use emojis. Link: https://wa.me/5521964816185";
 
-    // Resposta do Gemini
-    const prompt = `${systemInstruction}\n\nUsuário: ${text}`;
+    // Chamada para o Gemini (Motor 1.5 Flash)
+    const prompt = `${systemInstruction}\n\nUsuário diz: ${text}`;
     const result = await model.generateContent(prompt);
     const resposta = result.response.text();
 
-    // 3. ENVIO WHATSAPP
+    // 3. ENVIO PARA WHATSAPP
     await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: "whatsapp",
       to: from,
@@ -63,7 +62,7 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error("❌ ERRO NO PROCESSAMENTO:", error.message);
+    console.error("❌ ERRO NO SISTEMA:", error.message);
     res.sendStatus(200);
   }
 });
@@ -71,6 +70,6 @@ app.post("/webhook", async (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("=====================================");
-  console.log("🚀 SISTEMA ATUALIZADO: LIS + GEMINI ONLINE!");
+  console.log("🚀 LIS ONLINE COM GEMINI 1.5 FLASH!");
   console.log("=====================================");
 });
