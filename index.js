@@ -11,7 +11,7 @@ app.use(express.json());
 const VERIFY_TOKEN = "lis_token_123"; 
 const ACCESS_TOKEN = "EAANvwn5xPGIBRBz2rznmn0sYtm7j6U7bK02nNTqGaO6IDZCCQ3PiZBFPFhZB0Hi61ydq9YQ4OrecCnzxvejZB6MIRZCHEfeZA6B2buOl6Voev59bEuuljjKMU7tjMg1puOHYEy2lduYDhyrhGanZCxZCOBej4WvCHJMKR65ZBixh1dFrXTw7vomZArjFDZCsamZCbUkn9AZDZD"; 
 const PHONE_NUMBER_ID = "1049978348196137"; 
-const OPENAI_API_KEY = "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"; 
+const OPENAI_API_KEY = "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"; 
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const memory = {};
