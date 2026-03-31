@@ -6,26 +6,25 @@ const app = express();
 app.use(express.json());
 
 // =========================================================
-// 🛡️ CONFIGURAÇÕES - INSIRA SEUS DADOS ENTRE AS ASPAS
+// 🛡️ CONFIGURAÇÕES VIA AMBIENTE (RENDER)
 // =========================================================
-const VERIFY_TOKEN = "lis_token_123"; 
-const ACCESS_TOKEN = "EAANvwn5xPGIBRBeaUAge4DvVG4ujPahMDZCdmMZCke2jAzDtVCOZAFk7EuAGZC6BjyrpAURbZBf6O21B1NuRmRdygyt5XsbgFTrN82cSbxvix6rDbujRq6o04OyOPZCduUYZB7XgPfZCxVjKUj0hZB5fx5DBGg5nqyPzmKVHIEeSmdHZAojsT03IcqbIzqlQUY59Q3yQZDZD"; 
-const PHONE_NUMBER_ID = "1049978348196137"; 
-const GEMINI_API_KEY = "AIzaSyCIkVJdOwbmV9Cd5s7Y92WwgHHvi-hiHvw"; 
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lis_token_123"; 
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN; 
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// Inicialização Única do Gemini
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
-const memory = {};
-
-// 1. VALIDAÇÃO DO WEBHOOK
+// 1. VALIDAÇÃO DO WEBHOOK (META)
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ WEBHOOK VALIDADO COM SUCESSO!");
+    console.log("✅ WEBHOOK VALIDADO!");
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
@@ -45,15 +44,15 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 Mensagem de ${from}: ${text}`);
 
-    // Contexto da Lis
+    // Instruções da Lis
     const systemInstruction = "Você é a Lis, atendente da PlayPrime IPTV. Planos: 1 tela R$30, 2 telas R$50, 3 telas R$70. Seja vendedora e use emojis. Link: https://wa.me/5521964816185";
 
-    // Chamada para o Gemini
-    const prompt = `${systemInstruction}\n\nUsuário diz: ${text}`;
+    // Resposta do Gemini
+    const prompt = `${systemInstruction}\n\nUsuário: ${text}`;
     const result = await model.generateContent(prompt);
     const resposta = result.response.text();
 
-    // 3. ENVIO PARA WHATSAPP
+    // 3. ENVIO WHATSAPP
     await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: "whatsapp",
       to: from,
@@ -64,7 +63,7 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error("❌ ERRO NO GEMINI OU WHATSAPP:", error.message);
+    console.error("❌ ERRO NO PROCESSAMENTO:", error.message);
     res.sendStatus(200);
   }
 });
