@@ -24,19 +24,31 @@ const openai = new OpenAI({
 const MODEL_NAME = "gpt-4o-mini";
 console.log(`🚀 Usando modelo: ${MODEL_NAME}`);
 
-// ==================== CONTROLE ANTI-LOOP ====================
-// Guarda mensagens já processadas
+// ==================== MEMÓRIA TEMPORÁRIA ====================
+// mensagens já processadas
 const processedMessages = new Map();
 
-// Guarda último tempo de mensagem por usuário
+// cooldown por usuário
 const userCooldown = new Map();
 
-// Limpa memória periodicamente
+// pausa atendimento automático quando humano assumir
+const humanPausedUsers = new Map();
+
+// histórico simples por usuário
+const conversationHistory = new Map();
+
+// ==================== CONFIGS ====================
+const MESSAGE_TTL_MS = 10 * 60 * 1000;      // 10 min
+const COOLDOWN_MS = 4000;                   // 4 segundos
+const HUMAN_PAUSE_MS = 30 * 60 * 1000;      // 30 min
+const HISTORY_LIMIT = 10;                   // últimas 10 falas
+
+// ==================== HELPERS ====================
 function cleanupMemory() {
   const now = Date.now();
 
   for (const [messageId, timestamp] of processedMessages.entries()) {
-    if (now - timestamp > 10 * 60 * 1000) {
+    if (now - timestamp > MESSAGE_TTL_MS) {
       processedMessages.delete(messageId);
     }
   }
@@ -46,6 +58,47 @@ function cleanupMemory() {
       userCooldown.delete(user);
     }
   }
+
+  for (const [user, timestamp] of humanPausedUsers.entries()) {
+    if (now - timestamp > HUMAN_PAUSE_MS) {
+      humanPausedUsers.delete(user);
+      console.log(`🤖 Atendimento automático reativado para ${user}`);
+    }
+  }
+}
+
+function addToHistory(user, role, content) {
+  if (!conversationHistory.has(user)) {
+    conversationHistory.set(user, []);
+  }
+
+  const history = conversationHistory.get(user);
+  history.push({ role, content });
+
+  if (history.length > HISTORY_LIMIT) {
+    history.shift();
+  }
+}
+
+function getHistoryMessages(user) {
+  const history = conversationHistory.get(user) || [];
+  return history.map(item => ({
+    role: item.role,
+    content: item.content
+  }));
+}
+
+function isHumanPauseActive(user) {
+  const pausedAt = humanPausedUsers.get(user);
+  if (!pausedAt) return false;
+
+  const now = Date.now();
+  if (now - pausedAt > HUMAN_PAUSE_MS) {
+    humanPausedUsers.delete(user);
+    return false;
+  }
+
+  return true;
 }
 
 setInterval(cleanupMemory, 60 * 1000);
@@ -66,20 +119,18 @@ app.get("/webhook", (req, res) => {
 
 // ==================== WEBHOOK POST ====================
 app.post("/webhook", async (req, res) => {
-  // Responde rápido pra Meta evitar reenvio do mesmo evento
   res.sendStatus(200);
 
   try {
-    const change = req.body.entry?.[0]?.changes?.[0]?.value;
-    const message = change?.messages?.[0];
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
+    const status = value?.statuses?.[0];
 
-    // Ignora se não houver mensagem
+    // Ignora status de entrega/leitura
+    if (status) return;
+
     if (!message) return;
-
-    // Ignora mensagens que não sejam texto
     if (message.type !== "text") return;
-
-    // Ignora mensagens sem conteúdo
     if (!message.text?.body?.trim()) return;
 
     const messageId = message.id;
@@ -97,43 +148,46 @@ app.post("/webhook", async (req, res) => {
     const now = Date.now();
     const lastMessageTime = userCooldown.get(from);
 
-    if (lastMessageTime && now - lastMessageTime < 4000) {
+    if (lastMessageTime && now - lastMessageTime < COOLDOWN_MS) {
       console.log(`⚠️ Cooldown ativo para ${from}, ignorando mensagem`);
       return;
     }
-
     userCooldown.set(from, now);
+
+    // ==================== PAUSA QUANDO HUMANO ASSUME ====================
+    if (isHumanPauseActive(from)) {
+      console.log(`⏸️ Bot pausado para ${from} porque humano assumiu`);
+      return;
+    }
 
     console.log(`📩 Mensagem de ${from}: ${userText}`);
 
-    // ==================== PROMPT ====================
-    const prompt = `Você é a Lis, atendente da PlayPrime.
+    // guarda fala do cliente
+    addToHistory(from, "user", userText);
+
+    const systemPrompt = `
+Você é a Lis, atendente da PlayPrime.
 
 Regras:
 - Seja simpática, objetiva e natural.
-- Nunca repita saudação sem necessidade.
-- Não envie várias mensagens iguais.
-- Responda sempre de forma curta.
-- Se o cliente disser que já foi ajudado, agradeça e encerre educadamente.
-- Não insista se a conversa já terminou.
+- Responda curto e de forma humana.
+- Não repita saudação em toda mensagem.
+- Nunca envie duas mensagens iguais.
+- Se o cliente demonstrar que não precisa mais de ajuda, apenas encerre educadamente.
+- Se o cliente quiser atendimento humano, informe que vai encaminhar.
+- Se a conversa já estiver em andamento, responda direto ao ponto.
+- Seu objetivo é ajudar e converter, sem parecer robô.
+`;
 
-Cliente: "${userText}"`;
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...getHistoryMessages(from)
+    ];
 
-    // ==================== OPENAI REQUEST ====================
     const completion = await openai.chat.completions.create({
       model: MODEL_NAME,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Você é uma atendente educada, simpática e objetiva. Não repita cumprimento em toda mensagem. Se a conversa já estiver em andamento, responda direto ao ponto."
-        },
-        {
-          role: "user",
-          content: prompt
-        }
-      ],
-      max_tokens: 150,
+      messages,
+      max_tokens: 180,
     });
 
     let resposta = completion.choices?.[0]?.message?.content?.trim();
@@ -146,7 +200,6 @@ Cliente: "${userText}"`;
       resposta = resposta.substring(0, 1497) + "...";
     }
 
-    // ==================== ENVIO WHATSAPP ====================
     await axios.post(
       `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
       {
@@ -162,11 +215,64 @@ Cliente: "${userText}"`;
       }
     );
 
-    console.log("✅ Resposta enviada");
+    // guarda fala da assistente
+    addToHistory(from, "assistant", resposta);
+
+    console.log(`✅ Resposta enviada para ${from}`);
 
   } catch (error) {
     console.error("❌ ERRO:", error.response?.data || error.message);
   }
+});
+
+// ==================== ROTA PARA PAUSAR BOT MANUALMENTE ====================
+// Você pode chamar essa rota quando assumir atendimento humano
+app.post("/pause-bot", express.json(), (req, res) => {
+  try {
+    const { user } = req.body;
+
+    if (!user) {
+      return res.status(400).json({ error: "Número do usuário é obrigatório" });
+    }
+
+    humanPausedUsers.set(user, Date.now());
+    console.log(`⏸️ Bot pausado manualmente para ${user}`);
+
+    return res.json({
+      success: true,
+      message: `Bot pausado para ${user} por 30 minutos`
+    });
+  } catch (error) {
+    console.error("❌ ERRO AO PAUSAR BOT:", error.message);
+    return res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+// ==================== ROTA PARA REATIVAR BOT ====================
+app.post("/resume-bot", express.json(), (req, res) => {
+  try {
+    const { user } = req.body;
+
+    if (!user) {
+      return res.status(400).json({ error: "Número do usuário é obrigatório" });
+    }
+
+    humanPausedUsers.delete(user);
+    console.log(`▶️ Bot reativado manualmente para ${user}`);
+
+    return res.json({
+      success: true,
+      message: `Bot reativado para ${user}`
+    });
+  } catch (error) {
+    console.error("❌ ERRO AO REATIVAR BOT:", error.message);
+    return res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+// ==================== ROTA DE TESTE ====================
+app.get("/", (req, res) => {
+  res.send("LIS ONLINE ✅");
 });
 
 // ==================== INICIAR ====================
