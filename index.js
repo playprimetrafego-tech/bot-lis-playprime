@@ -1,6 +1,5 @@
 const express = require("express");
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(express.json());
@@ -8,20 +7,58 @@ app.use(express.json());
 // ==================== CONFIGURAÇÕES ====================
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const KIMI_API_KEY = process.env.KIMI_API_KEY; // Nova variável
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lis_token_123";
 
-if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !GEMINI_API_KEY) {
+if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !KIMI_API_KEY) {
   console.error("❌ Faltando variáveis de ambiente!");
+  process.exit(1);
 }
 
-// ==================== GEMINI ====================
-const MODEL_NAME = "gemini-2.5-flash-lite";
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: MODEL_NAME });
-
+const MODEL_NAME = "kimi-k2-5";
 console.log(`🚀 Usando modelo: ${MODEL_NAME}`);
+
+// ==================== FUNÇÃO KIMI ====================
+async function gerarRespostaLis(userText) {
+  try {
+    const response = await axios.post(
+      "https://api.moonshot.cn/v1/chat/completions",
+      {
+        model: MODEL_NAME,
+        messages: [
+          {
+            role: "system",
+            content: `Você é a Lis, atendente virtual da PlayPrime IPTV.
+            
+Regras:
+- Seja direta, educada e humanizada
+- Planos: 1 tela R$30 | 2 telas R$50 | 3 telas R$70
+- Para suporte humano: https://wa.me/5521964816185
+- Respostas curtas (máx 2-3 frases)`
+          },
+          {
+            role: "user",
+            content: userText
+          }
+        ],
+        temperature: 0.7,
+        max_tokens: 500
+      },
+      {
+        headers: {
+          "Authorization": `Bearer ${KIMI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 10000 // 10 segundos timeout
+      }
+    );
+
+    return response.data.choices[0].message.content;
+  } catch (error) {
+    console.error("❌ Erro na API Kimi:", error.response?.data || error.message);
+    throw error;
+  }
+}
 
 // ==================== WEBHOOK GET ====================
 app.get("/webhook", (req, res) => {
@@ -38,68 +75,77 @@ app.get("/webhook", (req, res) => {
 
 // ==================== WEBHOOK POST ====================
 app.post("/webhook", async (req, res) => {
+  let from = null;
+  
   try {
     const entry = req.body.entry?.[0];
     const message = entry?.changes?.[0]?.value?.messages?.[0];
 
     if (!message || !message.text?.body) return res.sendStatus(200);
 
-    const from = message.from;
+    from = message.from;
     const userText = message.text.body.trim();
 
     console.log(`📩 Mensagem de ${from}: ${userText}`);
 
-    const prompt = `Você é a Lis, atendente da PlayPrime IPTV.
+    // Usando Kimi em vez de Gemini
+    let resposta = await gerarRespostaLis(userText);
 
-Planos:
-• 1 tela → R$30
-• 2 telas → R$50
-• 3 telas → R$70
+    // Limita tamanho para WhatsApp
+    if (resposta.length > 1500) {
+      resposta = resposta.substring(0, 1497) + "...";
+    }
 
-Link humano: https://wa.me/5521964816185
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: from,
+        text: { body: resposta }
+      },
+      {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
+      }
+    );
 
-Responda curto e educado.
-Cliente: "${userText}"`;
-
-    const result = await model.generateContent(prompt);
-    let resposta = result.response.text();
-
-    if (resposta.length > 1500) resposta = resposta.substring(0, 1497) + "...";
-
-    await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-      messaging_product: "whatsapp",
-      to: from,
-      text: { body: resposta }
-    }, {
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-    });
-
-    console.log(`✅ Resposta enviada`);
+    console.log(`✅ Resposta enviada para ${from}`);
 
   } catch (error) {
     console.error("❌ ERRO:", error.message);
+    
+    // Fallback para suporte humano
+    if (from) {
+      const fallbackMsg = "Oi! Estou com instabilidade técnica no momento. Por favor, fale com o suporte humano: https://wa.me/5521964816185";
 
-    // Mensagem automática quando chave bloqueada ou quota zerada
-    let fallbackMsg = "Oi! Estou com muita demanda no momento. Por favor, tente novamente em alguns minutos ou fale direto com o suporte humano: https://wa.me/5521964816185";
-
-    if (error.message.includes("leaked") || error.message.includes("403")) {
-      fallbackMsg = "Desculpe, estou com problema técnico temporário. Fale com o suporte: https://wa.me/5521964816185";
-    }
-
-    try {
-      await axios.post(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-        messaging_product: "whatsapp",
-        to: message.from,
-        text: { body: fallbackMsg }
-      }, {
-        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-      });
-    } catch (e) {
-      console.error("Falha ao enviar mensagem de fallback");
+      try {
+        await axios.post(
+          `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: "whatsapp",
+            to: from,
+            text: { body: fallbackMsg }
+          },
+          {
+            headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
+          }
+        );
+        console.log("📤 Fallback enviado");
+      } catch (e) {
+        console.error("❌ Falha no fallback:", e.message);
+      }
     }
   }
 
   res.sendStatus(200);
+});
+
+// ==================== HEALTH CHECK ====================
+app.get("/", (req, res) => {
+  res.json({ 
+    status: "LIS ONLINE", 
+    modelo: MODEL_NAME, 
+    timestamp: new Date().toISOString() 
+  });
 });
 
 // ==================== INICIAR ====================
