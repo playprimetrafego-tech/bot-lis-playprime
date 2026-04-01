@@ -1,281 +1,269 @@
 const express = require("express");
 const axios = require("axios");
 const OpenAI = require("openai");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 const app = express();
 app.use(express.json());
 
-// ==================== CONFIGURAÇÕES ====================
+// =============================
+// CONFIGURAÇÕES
+// =============================
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lis_token_123";
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !OPENAI_API_KEY) {
-  console.error("❌ Faltando variáveis de ambiente!");
+if (!VERIFY_TOKEN || !ACCESS_TOKEN || !PHONE_NUMBER_ID || !OPENAI_API_KEY) {
+  console.error("❌ Faltam variáveis de ambiente. Verifique o Render.");
+  process.exit(1);
 }
 
-// ==================== OPENAI ====================
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
 });
 
-const MODEL_NAME = "gpt-4o-mini";
-console.log(`🚀 Usando modelo: ${MODEL_NAME}`);
+// =============================
+// MEMÓRIA
+// =============================
+const memory = {};
+const MAX_HISTORY = 20;
 
-// ==================== MEMÓRIA TEMPORÁRIA ====================
-// mensagens já processadas
-const processedMessages = new Map();
+// =============================
+// FUNÇÕES AUXILIARES
+// =============================
+function ensureMemory(from) {
+  if (!memory[from]) memory[from] = [];
+}
 
-// cooldown por usuário
-const userCooldown = new Map();
+function pushMemory(from, role, content) {
+  ensureMemory(from);
+  memory[from].push({ role, content });
 
-// pausa atendimento automático quando humano assumir
-const humanPausedUsers = new Map();
+  if (memory[from].length > MAX_HISTORY) {
+    memory[from] = memory[from].slice(-MAX_HISTORY);
+  }
+}
 
-// histórico simples por usuário
-const conversationHistory = new Map();
+async function sendWhatsAppText(to, body) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+}
 
-// ==================== CONFIGS ====================
-const MESSAGE_TTL_MS = 10 * 60 * 1000;      // 10 min
-const COOLDOWN_MS = 4000;                   // 4 segundos
-const HUMAN_PAUSE_MS = 30 * 60 * 1000;      // 30 min
-const HISTORY_LIMIT = 10;                   // últimas 10 falas
+async function getMediaUrl(mediaId) {
+  const response = await axios.get(
+    `https://graph.facebook.com/v19.0/${mediaId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+      },
+    }
+  );
 
-// ==================== HELPERS ====================
-function cleanupMemory() {
-  const now = Date.now();
+  return response.data.url;
+}
 
-  for (const [messageId, timestamp] of processedMessages.entries()) {
-    if (now - timestamp > MESSAGE_TTL_MS) {
-      processedMessages.delete(messageId);
+async function downloadWhatsAppMedia(mediaUrl, outputPath) {
+  const response = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+    },
+  });
+
+  fs.writeFileSync(outputPath, response.data);
+}
+
+async function transcribeAudioFromWhatsApp(audioId) {
+  const mediaUrl = await getMediaUrl(audioId);
+
+  const tempPath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
+  await downloadWhatsAppMedia(mediaUrl, tempPath);
+
+  try {
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tempPath),
+      model: "gpt-4o-mini-transcribe",
+    });
+
+    return transcription.text?.trim() || "";
+  } finally {
+    if (fs.existsSync(tempPath)) {
+      fs.unlinkSync(tempPath);
     }
   }
-
-  for (const [user, timestamp] of userCooldown.entries()) {
-    if (now - timestamp > 60 * 1000) {
-      userCooldown.delete(user);
-    }
-  }
-
-  for (const [user, timestamp] of humanPausedUsers.entries()) {
-    if (now - timestamp > HUMAN_PAUSE_MS) {
-      humanPausedUsers.delete(user);
-      console.log(`🤖 Atendimento automático reativado para ${user}`);
-    }
-  }
 }
 
-function addToHistory(user, role, content) {
-  if (!conversationHistory.has(user)) {
-    conversationHistory.set(user, []);
-  }
+function buildSystemPrompt() {
+  return `
+Você é a Lis, atendente virtual da PlayPrime IPTV.
 
-  const history = conversationHistory.get(user);
-  history.push({ role, content });
+PERSONALIDADE:
+- Humana, simpática, objetiva e natural
+- Fala como uma pessoa real no WhatsApp
+- Frases curtas e claras
+- Nunca pareça robótica
+- Seja acolhedora, mas sem enrolar
 
-  if (history.length > HISTORY_LIMIT) {
-    history.shift();
-  }
+OBJETIVO:
+- Entender o que a pessoa quer
+- Conduzir a conversa para teste, planos e fechamento
+- Fazer a conversa avançar de forma leve
+
+PLANOS:
+- 1 tela: R$30
+- 2 telas: R$50
+- 3 telas: R$70
+
+REGRAS:
+- Não repetir perguntas
+- Não mandar texto gigante
+- Usar o contexto da conversa
+- Fazer no máximo uma pergunta por vez
+- Sempre tentar avançar para a próxima etapa
+- Se a pessoa demonstrar interesse, conduza para fechar
+- Se a pessoa estiver em dúvida, responda curto e com segurança
+- Não invente informações técnicas que não estão disponíveis
+- Não use linguagem engessada de robô
+- Evite excesso de emojis; use poucos e bem
+
+FLUXO IDEAL:
+1. Descobrir se quer teste, planos ou tirar dúvida
+2. Entender onde vai usar (TV, celular, TV Box, etc.)
+3. Oferecer teste se fizer sentido
+4. Apresentar o plano adequado
+5. Conduzir para fechamento
+
+FECHAMENTO:
+Quando a pessoa quiser comprar, diga exatamente:
+"Perfeito 😊 vou te encaminhar para finalizarmos agora:
+https://wa.me/5521964816185"
+
+ESTILO DE RESPOSTA:
+- Sempre responda em português do Brasil
+- Respostas curtas
+- Naturais
+- Diretas
+- Com tom comercial leve
+`;
 }
 
-function getHistoryMessages(user) {
-  const history = conversationHistory.get(user) || [];
-  return history.map(item => ({
-    role: item.role,
-    content: item.content
-  }));
+async function generateLisReply(from, userText) {
+  pushMemory(from, "user", userText);
+
+  const response = await openai.responses.create({
+    model: "gpt-4.1-mini",
+    input: [
+      {
+        role: "system",
+        content: buildSystemPrompt(),
+      },
+      ...memory[from],
+    ],
+  });
+
+  let reply =
+    response.output_text?.trim() ||
+    "Me fala se você quer teste grátis ou conhecer os planos. 😊";
+
+  pushMemory(from, "assistant", reply);
+
+  return reply;
 }
 
-function isHumanPauseActive(user) {
-  const pausedAt = humanPausedUsers.get(user);
-  if (!pausedAt) return false;
-
-  const now = Date.now();
-  if (now - pausedAt > HUMAN_PAUSE_MS) {
-    humanPausedUsers.delete(user);
-    return false;
-  }
-
-  return true;
-}
-
-setInterval(cleanupMemory, 60 * 1000);
-
-// ==================== WEBHOOK GET ====================
+// =============================
+// VERIFICAÇÃO WEBHOOK
+// =============================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ Webhook verificado pela Meta");
     return res.status(200).send(challenge);
   }
 
   return res.sendStatus(403);
 });
 
-// ==================== WEBHOOK POST ====================
+// =============================
+// RECEBER MENSAGENS
+// =============================
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-
   try {
-    const value = req.body.entry?.[0]?.changes?.[0]?.value;
-    const message = value?.messages?.[0];
-    const status = value?.statuses?.[0];
+    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    // Ignora status de entrega/leitura
-    if (status) return;
+    if (!message) {
+      return res.sendStatus(200);
+    }
 
-    if (!message) return;
-    if (message.type !== "text") return;
-    if (!message.text?.body?.trim()) return;
-
-    const messageId = message.id;
     const from = message.from;
-    const userText = message.text.body.trim();
+    let text = "";
 
-    // ==================== ANTI-DUPLICAÇÃO ====================
-    if (processedMessages.has(messageId)) {
-      console.log(`⚠️ Mensagem duplicada ignorada: ${messageId}`);
-      return;
-    }
-    processedMessages.set(messageId, Date.now());
+    if (message.type === "text") {
+      text = message.text?.body?.trim() || "";
+    } else if (message.type === "audio") {
+      const audioId = message.audio?.id;
 
-    // ==================== ANTI-FLOOD ====================
-    const now = Date.now();
-    const lastMessageTime = userCooldown.get(from);
-
-    if (lastMessageTime && now - lastMessageTime < COOLDOWN_MS) {
-      console.log(`⚠️ Cooldown ativo para ${from}, ignorando mensagem`);
-      return;
-    }
-    userCooldown.set(from, now);
-
-    // ==================== PAUSA QUANDO HUMANO ASSUME ====================
-    if (isHumanPauseActive(from)) {
-      console.log(`⏸️ Bot pausado para ${from} porque humano assumiu`);
-      return;
-    }
-
-    console.log(`📩 Mensagem de ${from}: ${userText}`);
-
-    // guarda fala do cliente
-    addToHistory(from, "user", userText);
-
-    const systemPrompt = `
-Você é a Lis, atendente da PlayPrime.
-
-Regras:
-- Seja simpática, objetiva e natural.
-- Responda curto e de forma humana.
-- Não repita saudação em toda mensagem.
-- Nunca envie duas mensagens iguais.
-- Se o cliente demonstrar que não precisa mais de ajuda, apenas encerre educadamente.
-- Se o cliente quiser atendimento humano, informe que vai encaminhar.
-- Se a conversa já estiver em andamento, responda direto ao ponto.
-- Seu objetivo é ajudar e converter, sem parecer robô.
-`;
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...getHistoryMessages(from)
-    ];
-
-    const completion = await openai.chat.completions.create({
-      model: MODEL_NAME,
-      messages,
-      max_tokens: 180,
-    });
-
-    let resposta = completion.choices?.[0]?.message?.content?.trim();
-
-    if (!resposta) {
-      resposta = "Oi! Como posso te ajudar?";
-    }
-
-    if (resposta.length > 1500) {
-      resposta = resposta.substring(0, 1497) + "...";
-    }
-
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: from,
-        text: { body: resposta }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+      if (!audioId) {
+        await sendWhatsAppText(
+          from,
+          "Recebi seu áudio, mas não consegui processar. Pode me mandar em texto? 🙂"
+        );
+        return res.sendStatus(200);
       }
-    );
 
-    // guarda fala da assistente
-    addToHistory(from, "assistant", resposta);
-
-    console.log(`✅ Resposta enviada para ${from}`);
-
-  } catch (error) {
-    console.error("❌ ERRO:", error.response?.data || error.message);
-  }
-});
-
-// ==================== ROTA PARA PAUSAR BOT MANUALMENTE ====================
-// Você pode chamar essa rota quando assumir atendimento humano
-app.post("/pause-bot", express.json(), (req, res) => {
-  try {
-    const { user } = req.body;
-
-    if (!user) {
-      return res.status(400).json({ error: "Número do usuário é obrigatório" });
+      text = await transcribeAudioFromWhatsApp(audioId);
+    } else {
+      await sendWhatsAppText(
+        from,
+        "No momento consigo te atender melhor por texto e áudio. Me manda sua dúvida que eu te ajudo. 😊"
+      );
+      return res.sendStatus(200);
     }
 
-    humanPausedUsers.set(user, Date.now());
-    console.log(`⏸️ Bot pausado manualmente para ${user}`);
-
-    return res.json({
-      success: true,
-      message: `Bot pausado para ${user} por 30 minutos`
-    });
-  } catch (error) {
-    console.error("❌ ERRO AO PAUSAR BOT:", error.message);
-    return res.status(500).json({ error: "Erro interno" });
-  }
-});
-
-// ==================== ROTA PARA REATIVAR BOT ====================
-app.post("/resume-bot", express.json(), (req, res) => {
-  try {
-    const { user } = req.body;
-
-    if (!user) {
-      return res.status(400).json({ error: "Número do usuário é obrigatório" });
+    if (!text) {
+      await sendWhatsAppText(
+        from,
+        "Não consegui entender sua mensagem. Pode me mandar de novo em texto ou áudio? 🙂"
+      );
+      return res.sendStatus(200);
     }
 
-    humanPausedUsers.delete(user);
-    console.log(`▶️ Bot reativado manualmente para ${user}`);
+    console.log("Cliente:", text);
 
-    return res.json({
-      success: true,
-      message: `Bot reativado para ${user}`
-    });
+    const reply = await generateLisReply(from, text);
+
+    console.log("Lis:", reply);
+
+    await sendWhatsAppText(from, reply);
+
+    return res.sendStatus(200);
   } catch (error) {
-    console.error("❌ ERRO AO REATIVAR BOT:", error.message);
-    return res.status(500).json({ error: "Erro interno" });
+    console.error("ERRO:", error.response?.data || error.message);
+    return res.sendStatus(500);
   }
 });
 
-// ==================== ROTA DE TESTE ====================
-app.get("/", (req, res) => {
-  res.send("LIS ONLINE ✅");
-});
-
-// ==================== INICIAR ====================
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 LIS ONLINE | Modelo: ${MODEL_NAME} | Porta: ${PORT}`);
+// =============================
+// START
+// =============================
+app.listen(PORT, () => {
+  console.log(`🔥 BOT RODANDO NA PORTA ${PORT}`);
 });
