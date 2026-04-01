@@ -9,38 +9,35 @@ const app = express();
 app.use(express.json());
 
 // =============================
-// CONFIGURAÇÕES
+// CONFIG
 // =============================
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "lis_token_123";
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const PORT = process.env.PORT || 3000;
-
-if (!VERIFY_TOKEN || !ACCESS_TOKEN || !PHONE_NUMBER_ID || !OPENAI_API_KEY) {
-  console.error("❌ Faltam variáveis de ambiente. Verifique o Render.");
-  process.exit(1);
-}
 
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
 });
 
+const PORT = process.env.PORT || 3000;
+
 // =============================
-// MEMÓRIA
+// MEMÓRIA + CONTROLE
 // =============================
 const memory = {};
 const MAX_HISTORY = 20;
 
-// =============================
-// FUNÇÕES AUXILIARES
-// =============================
-function ensureMemory(from) {
-  if (!memory[from]) memory[from] = [];
-}
+// anti duplicação
+const processedMessages = new Set();
+const processingUsers = new Set();
 
+// =============================
+// FUNÇÕES
+// =============================
 function pushMemory(from, role, content) {
-  ensureMemory(from);
+  if (!memory[from]) memory[from] = [];
+
   memory[from].push({ role, content });
 
   if (memory[from].length > MAX_HISTORY) {
@@ -48,14 +45,14 @@ function pushMemory(from, role, content) {
   }
 }
 
-async function sendWhatsAppText(to, body) {
+async function sendWhatsApp(to, text) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body },
+      text: { body: text },
     },
     {
       headers: {
@@ -66,121 +63,81 @@ async function sendWhatsAppText(to, body) {
   );
 }
 
-async function getMediaUrl(mediaId) {
-  const response = await axios.get(
-    `https://graph.facebook.com/v19.0/${mediaId}`,
-    {
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
-      },
-    }
-  );
-
-  return response.data.url;
-}
-
-async function downloadWhatsAppMedia(mediaUrl, outputPath) {
-  const response = await axios.get(mediaUrl, {
-    responseType: "arraybuffer",
-    headers: {
-      Authorization: `Bearer ${ACCESS_TOKEN}`,
-    },
-  });
-
-  fs.writeFileSync(outputPath, response.data);
-}
-
-async function transcribeAudioFromWhatsApp(audioId) {
-  const mediaUrl = await getMediaUrl(audioId);
-
-  const tempPath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
-  await downloadWhatsAppMedia(mediaUrl, tempPath);
-
+async function getAudioText(audioId) {
   try {
+    const media = await axios.get(
+      `https://graph.facebook.com/v19.0/${audioId}`,
+      {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+      }
+    );
+
+    const url = media.data.url;
+
+    const file = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+    });
+
+    const temp = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
+    fs.writeFileSync(temp, file.data);
+
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
+      file: fs.createReadStream(temp),
       model: "gpt-4o-mini-transcribe",
     });
 
-    return transcription.text?.trim() || "";
-  } finally {
-    if (fs.existsSync(tempPath)) {
-      fs.unlinkSync(tempPath);
-    }
+    fs.unlinkSync(temp);
+
+    return transcription.text;
+  } catch (e) {
+    console.log("Erro áudio:", e.message);
+    return "";
   }
 }
 
-function buildSystemPrompt() {
+function promptBase() {
   return `
-Você é a Lis, atendente virtual da PlayPrime IPTV.
+Você é a Lis, atendente da PlayPrime IPTV.
 
-PERSONALIDADE:
-- Humana, simpática, objetiva e natural
-- Fala como uma pessoa real no WhatsApp
-- Frases curtas e claras
-- Nunca pareça robótica
-- Seja acolhedora, mas sem enrolar
+Fale como humano no WhatsApp.
+Seja simpática, direta e natural.
 
 OBJETIVO:
-- Entender o que a pessoa quer
-- Conduzir a conversa para teste, planos e fechamento
-- Fazer a conversa avançar de forma leve
+Vender e conduzir a conversa.
 
 PLANOS:
-- 1 tela: R$30
-- 2 telas: R$50
-- 3 telas: R$70
+1 tela: R$30
+2 telas: R$50
+3 telas: R$70
 
 REGRAS:
+- Respostas curtas
+- Não parecer robô
+- Fazer 1 pergunta por vez
+- Sempre avançar a conversa
 - Não repetir perguntas
-- Não mandar texto gigante
-- Usar o contexto da conversa
-- Fazer no máximo uma pergunta por vez
-- Sempre tentar avançar para a próxima etapa
-- Se a pessoa demonstrar interesse, conduza para fechar
-- Se a pessoa estiver em dúvida, responda curto e com segurança
-- Não invente informações técnicas que não estão disponíveis
-- Não use linguagem engessada de robô
-- Evite excesso de emojis; use poucos e bem
-
-FLUXO IDEAL:
-1. Descobrir se quer teste, planos ou tirar dúvida
-2. Entender onde vai usar (TV, celular, TV Box, etc.)
-3. Oferecer teste se fizer sentido
-4. Apresentar o plano adequado
-5. Conduzir para fechamento
 
 FECHAMENTO:
-Quando a pessoa quiser comprar, diga exatamente:
 "Perfeito 😊 vou te encaminhar para finalizarmos agora:
 https://wa.me/5521964816185"
-
-ESTILO DE RESPOSTA:
-- Sempre responda em português do Brasil
-- Respostas curtas
-- Naturais
-- Diretas
-- Com tom comercial leve
 `;
 }
 
-async function generateLisReply(from, userText) {
-  pushMemory(from, "user", userText);
+async function gerarResposta(from, text) {
+  pushMemory(from, "user", text);
 
   const response = await openai.responses.create({
     model: "gpt-4.1-mini",
     input: [
-      {
-        role: "system",
-        content: buildSystemPrompt(),
-      },
+      { role: "system", content: promptBase() },
       ...memory[from],
     ],
   });
 
-  let reply =
-    response.output_text?.trim() ||
-    "Me fala se você quer teste grátis ou conhecer os planos. 😊";
+  const reply =
+    response.output_text ||
+    "Você quer testar ou conhecer os planos? 😊";
 
   pushMemory(from, "assistant", reply);
 
@@ -188,82 +145,90 @@ async function generateLisReply(from, userText) {
 }
 
 // =============================
-// VERIFICAÇÃO WEBHOOK
+// WEBHOOK
 // =============================
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === VERIFY_TOKEN
+  ) {
+    return res.send(req.query["hub.challenge"]);
   }
-
-  return res.sendStatus(403);
+  res.sendStatus(403);
 });
 
-// =============================
-// RECEBER MENSAGENS
-// =============================
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const change = req.body.entry?.[0]?.changes?.[0]?.value;
 
-    if (!message) {
+    if (!change?.messages) return res.sendStatus(200);
+
+    const message = change.messages[0];
+    if (!message) return res.sendStatus(200);
+
+    const from = message.from;
+    const messageId = message.id;
+
+    // =====================
+    // ANTI DUPLICAÇÃO
+    // =====================
+    if (processedMessages.has(messageId)) {
+      console.log("Duplicada ignorada");
       return res.sendStatus(200);
     }
 
-    const from = message.from;
+    processedMessages.add(messageId);
+    setTimeout(() => processedMessages.delete(messageId), 300000);
+
+    // trava concorrência
+    if (processingUsers.has(from)) {
+      console.log("Já processando...");
+      return res.sendStatus(200);
+    }
+
+    processingUsers.add(from);
+
+    // =====================
+    // TEXTO / ÁUDIO
+    // =====================
     let text = "";
 
     if (message.type === "text") {
-      text = message.text?.body?.trim() || "";
-    } else if (message.type === "audio") {
-      const audioId = message.audio?.id;
+      text = message.text.body;
+    }
 
-      if (!audioId) {
-        await sendWhatsAppText(
-          from,
-          "Recebi seu áudio, mas não consegui processar. Pode me mandar em texto? 🙂"
-        );
-        return res.sendStatus(200);
-      }
-
-      text = await transcribeAudioFromWhatsApp(audioId);
-    } else {
-      await sendWhatsAppText(
-        from,
-        "No momento consigo te atender melhor por texto e áudio. Me manda sua dúvida que eu te ajudo. 😊"
-      );
-      return res.sendStatus(200);
+    if (message.type === "audio") {
+      text = await getAudioText(message.audio.id);
     }
 
     if (!text) {
-      await sendWhatsAppText(
-        from,
-        "Não consegui entender sua mensagem. Pode me mandar de novo em texto ou áudio? 🙂"
-      );
+      processingUsers.delete(from);
       return res.sendStatus(200);
     }
 
     console.log("Cliente:", text);
 
-    const reply = await generateLisReply(from, text);
+    const resposta = await gerarResposta(from, text);
 
-    console.log("Lis:", reply);
+    console.log("Lis:", resposta);
 
-    await sendWhatsAppText(from, reply);
+    await sendWhatsApp(from, resposta);
 
-    return res.sendStatus(200);
-  } catch (error) {
-    console.error("ERRO:", error.response?.data || error.message);
-    return res.sendStatus(500);
+    processingUsers.delete(from);
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.log("ERRO:", e.message);
+    res.sendStatus(200);
   }
 });
 
 // =============================
-// START
+app.get("/", (req, res) => {
+  res.send("Lis rodando ✅");
+});
+
 // =============================
 app.listen(PORT, () => {
-  console.log(`🔥 BOT RODANDO NA PORTA ${PORT}`);
+  console.log("🔥 Rodando na porta", PORT);
 });
